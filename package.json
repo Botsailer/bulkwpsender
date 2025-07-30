@@ -5,8 +5,7 @@
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
-    "dev": "nodemon app.js",
-     "postinstall": "npx puppeteer browsers install chrome"
+    "dev": "nodemon app.js"
   },
   "keywords": [
     "whatsapp",
@@ -21,10 +20,8 @@
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "express-fileupload": "^1.5.2",
-    "fs": "^0.0.1-security",
     "node-cron": "^4.2.1",
-    "path": "^0.12.7",
-    "puppeteer": "^22.15.0",
+    "puppeteer-core": "^22.15.0",  // Changed to puppeteer-core
     "qrcode": "^1.5.4",
     "sqlite3": "^5.1.7",
     "uuid": "^11.1.0",
