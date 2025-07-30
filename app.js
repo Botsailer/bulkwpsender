@@ -322,14 +322,14 @@ async startDevice(deviceId) {
     
     if (platform === 'linux') {
       return [
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable',
-        '/usr/bin/chromium-browser',
-        '/usr/bin/chromium',
-        '/snap/bin/chromium',
-        '/var/lib/flatpak/exports/bin/com.google.Chrome',
-        '/usr/local/bin/chrome',
-        '/usr/local/bin/chromium'
+            const knownPaths = [
+          '/opt/render/.cache/puppeteer/chrome/linux-127.0.6533.88/chrome-linux64/chrome',
+          '/home/runner/.cache/puppeteer/chrome/linux-127.0.6533.88/chrome-linux64/chrome',
+          '/usr/bin/chromium-browser',
+          '/usr/bin/chromium',
+          '/usr/bin/google-chrome',
+          '/usr/bin/google-chrome-stable'
+        ];
       ];
     } else if (platform === 'win32') {
       const username = os.userInfo().username;
