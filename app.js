@@ -8,7 +8,7 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 const cron = require("node-cron");
 const sqlite3 = require("sqlite3").verbose();
 const { v4: uuidv4 } = require("uuid");
-const puppeteer = require("puppeteer");
+const puppeteer = require("puppeteer-core");  // Updated to puppeteer-core
 const qrcode = require("qrcode");
 
 const app = express();
@@ -172,6 +172,7 @@ class DeviceManager {
               "--user-agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'"
             ],
             ignoreHTTPSErrors: true,
+            executablePath: process.env.CHROME_EXECUTABLE_PATH || "/usr/bin/google-chrome"
           });
 
           device.client = new Client({
