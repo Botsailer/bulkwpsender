@@ -101,7 +101,7 @@ class DeviceManager {
     });
   }
 
-  async startDevice(deviceId) {
+async startDevice(deviceId) {
     const device = this.devices.get(deviceId);
     if (!device) throw new Error("Device not found");
 
@@ -138,58 +138,11 @@ class DeviceManager {
         try {
           console.log(`Starting device ${deviceId} (attempt ${attempts}/${maxAttempts})`);
           
-          // Get Chromium path for current environment
-          let executablePath = null;
-          if (os.platform() === 'linux') {
-            const possiblePaths = [
-              '/usr/bin/chromium-browser',
-              '/usr/bin/chromium',
-              '/usr/bin/google-chrome',
-              '/usr/bin/google-chrome-stable'
-            ];
-            
-            for (const path of possiblePaths) {
-              if (fs.existsSync(path)) {
-                executablePath = path;
-                break;
-              }
-            }
-          } else if (os.platform() === 'win32') {
-            executablePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-          } else if (os.platform() === 'darwin') {
-            executablePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-          }
-          
-          console.log(`Using Chromium at: ${executablePath || 'default'}`);
+          const browserConfig = await this.getBrowserConfig();
+          console.log(`Using browser configuration:`, browserConfig.executablePath ? `Custom path: ${browserConfig.executablePath}` : 'Puppeteer bundled Chromium');
 
-          // Launch browser
-          device.browser = await puppeteer.launch({
-            headless: true,
-            args: [
-              "--disable-setuid-sandbox",
-              "--no-sandbox",
-              "--disable-dev-shm-usage",
-              "--disable-accelerated-2d-canvas",
-              "--no-first-run",
-              "--no-zygote",
-              "--single-process",
-              "--disable-gpu",
-              "--disable-extensions",
-              "--disable-background-networking",
-              "--disable-default-apps",
-              "--disable-translate",
-              "--disable-sync",
-              "--disable-notifications",
-              "--disable-logging",
-              "--disable-software-rasterizer",
-              "--disable-web-security",
-              "--remote-debugging-port=0",
-              "--remote-debugging-address=0.0.0.0",
-              "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-            ],
-            ignoreHTTPSErrors: true,
-            executablePath: executablePath || undefined
-          });
+          // Launch browser with the detected configuration
+          device.browser = await puppeteer.launch(browserConfig);
 
           device.client = new Client({
             authStrategy: new LocalAuth({ clientId: deviceId }),
@@ -213,7 +166,6 @@ class DeviceManager {
               ["online", deviceId],
             );
             console.log(`Device ${deviceId} is ready!`);
-            this.setupMessageListener(device.client, deviceId);
           });
 
           device.client.on("disconnected", async (reason) => {
@@ -231,25 +183,38 @@ class DeviceManager {
           });
 
           device.client.on("error", (error) => {
-            console.error(`Client error: ${error}`);
+            console.error(`Client error for device ${deviceId}:`, error);
           });
 
           await device.client.initialize();
           success = true;
           console.log(`Device ${deviceId} started successfully`);
+          
         } catch (err) {
-          console.error(`Attempt ${attempts} failed: ${err.message}`);
+          console.error(`Attempt ${attempts} failed:`, err.message);
+          
+          // Clean up failed attempt
+          if (device.browser) {
+            try {
+              await device.browser.close();
+            } catch (cleanupError) {
+              console.error(`Error cleaning up browser on failed attempt:`, cleanupError);
+            }
+          }
+          
           if (attempts < maxAttempts) {
+            console.log(`Waiting ${2000 * attempts}ms before retry...`);
             await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
           } else {
-            throw err;
+            throw new Error(`Start failed after ${maxAttempts} attempts: ${err.message}`);
           }
         }
       }
 
       return { status: "initialized" };
+      
     } catch (err) {
-      console.error(`Start failed after 3 attempts: ${err}`);
+      console.error(`Device ${deviceId} start error:`, err);
       device.status = "error";
       db.run(
         "UPDATE devices SET status = ?, last_active = CURRENT_TIMESTAMP WHERE id = ?",
@@ -257,6 +222,133 @@ class DeviceManager {
       );
       throw err;
     }
+  }
+
+  async getBrowserConfig() {
+    const { execSync } = require('child_process');
+    
+    // Base configuration
+    const config = {
+      headless: true,
+      args: [
+        "--disable-setuid-sandbox",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--no-first-run",
+        "--no-zygote",
+        "--single-process",
+        "--disable-gpu",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-default-apps",
+        "--disable-translate",
+        "--disable-sync",
+        "--disable-notifications",
+        "--disable-logging",
+        "--disable-software-rasterizer",
+        "--disable-web-security",
+        "--disable-features=VizDisplayCompositor",
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      ],
+      ignoreHTTPSErrors: true,
+      defaultViewport: null
+    };
+
+    let executablePath = null;
+
+    // 1. Check for custom config path first
+    if (global.config && global.config.chromePath) {
+      if (fs.existsSync(global.config.chromePath)) {
+        executablePath = global.config.chromePath;
+        console.log(`Using custom Chrome path: ${executablePath}`);
+        config.executablePath = executablePath;
+        return config;
+      } else {
+        console.warn(`Custom Chrome path ${global.config.chromePath} does not exist`);
+      }
+    }
+
+    // 2. Try to find Puppeteer's bundled Chromium
+    try {
+      const puppeteerPath = require('puppeteer').executablePath();
+      if (fs.existsSync(puppeteerPath)) {
+        console.log(`Using Puppeteer bundled Chromium: ${puppeteerPath}`);
+        config.executablePath = puppeteerPath;
+        return config;
+      }
+    } catch (error) {
+      console.log('Puppeteer bundled Chromium not found, checking system browsers...');
+    }
+
+    // 3. Check system browsers by platform
+    const systemPaths = this.getSystemBrowserPaths();
+    for (const path of systemPaths) {
+      if (fs.existsSync(path)) {
+        executablePath = path;
+        console.log(`Found system browser: ${executablePath}`);
+        config.executablePath = executablePath;
+        return config;
+      }
+    }
+
+    // 4. If no browser found, try to install Puppeteer's Chromium
+    console.log('No browser found, attempting to install Puppeteer Chromium...');
+    try {
+      execSync('npx puppeteer browsers install chrome', { 
+        stdio: 'inherit',
+        timeout: 120000 // 2 minutes timeout
+      });
+      
+      // Try to get Puppeteer path again after installation
+      const puppeteerPath = require('puppeteer').executablePath();
+      if (fs.existsSync(puppeteerPath)) {
+        console.log(`Successfully installed and using Puppeteer Chromium: ${puppeteerPath}`);
+        config.executablePath = puppeteerPath;
+        return config;
+      }
+    } catch (installError) {
+      console.error('Failed to install Puppeteer Chromium:', installError.message);
+    }
+
+    // 5. Final fallback - let Puppeteer handle it (might fail)
+    console.log('Using Puppeteer default browser detection (last resort)');
+    return config;
+  }
+
+  getSystemBrowserPaths() {
+    const os = require('os');
+    const platform = os.platform();
+    
+    if (platform === 'linux') {
+      return [
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/snap/bin/chromium',
+        '/var/lib/flatpak/exports/bin/com.google.Chrome',
+        '/usr/local/bin/chrome',
+        '/usr/local/bin/chromium'
+      ];
+    } else if (platform === 'win32') {
+      const username = os.userInfo().username;
+      return [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        `C:\\Users\\${username}\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe`,
+        'C:\\Program Files\\Chromium\\Application\\chromium.exe',
+        'C:\\Program Files (x86)\\Chromium\\Application\\chromium.exe'
+      ];
+    } else if (platform === 'darwin') {
+      return [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary'
+      ];
+    }
+    
+    return [];
   }
 
   async handleDeviceDisconnection(deviceId, reason) {
