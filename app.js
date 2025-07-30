@@ -8,7 +8,7 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 const cron = require("node-cron");
 const sqlite3 = require("sqlite3").verbose();
 const { v4: uuidv4 } = require("uuid");
-const chromium = require("@sparticuz/chrome-aws-lambda");
+const puppeteer = require("puppeteer");
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -126,7 +126,9 @@ class DeviceManager {
         try {
           console.log(`Starting device ${deviceId} (attempt ${attempts}/${maxAttempts})`);
           
-          const browser = await chromium.puppeteer.launch({
+          // Use lightweight browser configuration
+          const browser = await puppeteer.launch({
+            headless: true,
             args: [
               "--disable-setuid-sandbox",
               "--disable-dev-shm-usage",
@@ -136,18 +138,35 @@ class DeviceManager {
               "--single-process",
               "--no-sandbox",
               "--disable-gpu",
-              "--headless=new",
+              "--disable-extensions",
+              "--disable-background-networking",
+              "--disable-default-apps",
+              "--disable-translate",
+              "--disable-sync",
+              "--disable-notifications",
+              "--disable-logging",
+              "--disable-software-rasterizer",
+              "--disable-web-security",
+              "--disable-breakpad",
+              "--memory-pressure-off",
+              "--mute-audio",
+              "--hide-scrollbars",
+              "--remote-debugging-port=0",
+              "--remote-debugging-address=0.0.0.0",
+              "--user-agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'"
             ],
-            executablePath: await chromium.executablePath,
-            headless: chromium.headless,
             ignoreHTTPSErrors: true,
           });
 
           device.client = new Client({
             authStrategy: new LocalAuth({ clientId: deviceId }),
             puppeteer: { 
-              browserWSEndpoint: browser.wsEndpoint() 
+              browser: browser
             },
+            webVersionCache: {
+              type: 'remote',
+              remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${config.webVersion || '2.2412.54'}.html`,
+            }
           });
 
           // Event handlers
@@ -328,7 +347,9 @@ class DeviceManager {
       console.error(`✗ Failed to send: ${err.message}`);
       db.run("UPDATE sent_messages SET status = ? WHERE id = ?", ["failed", msgId]);
 
-      if (err.message.includes("Evaluation failed") || err.message.includes("Target closed")) {
+      if (err.message.includes("Evaluation failed") || 
+          err.message.includes("Target closed") ||
+          err.message.includes("Protocol error")) {
         console.log(`Restarting device ${device.id} due to connection error`);
         this.restartDevice(device.id);
       }
