@@ -8,8 +8,9 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 const cron = require("node-cron");
 const sqlite3 = require("sqlite3").verbose();
 const { v4: uuidv4 } = require("uuid");
-const puppeteer = require("puppeteer-core");  // Updated to puppeteer-core
+const puppeteer = require("puppeteer");
 const qrcode = require("qrcode");
+const os = require("os");
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -19,18 +20,9 @@ app.use(express.static("public"));
 
 const config = require("./config.json");
 
-// Handle unhandled rejections gracefully
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("Unhandled Rejection at:", promise, "reason:", reason);
-});
-
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught Exception:", err);
-});
-
+// Database setup
 const db = new sqlite3.Database("messages.db");
 db.serialize(() => {
-  // Create tables
   db.run(`
     CREATE TABLE IF NOT EXISTS sent_messages (
       id TEXT PRIMARY KEY,
@@ -51,7 +43,6 @@ db.serialize(() => {
     )
   `);
   
-  // New table for pending messages
   db.run(`
     CREATE TABLE IF NOT EXISTS pending_messages (
       id TEXT PRIMARY KEY,
@@ -77,11 +68,11 @@ class DeviceManager {
     return new Promise((resolve, reject) => {
       db.all("SELECT * FROM devices", [], (err, rows) => {
         if (err) return reject(err);
-
         rows.forEach((row) => {
           this.devices.set(row.id, {
             ...row,
             client: null,
+            browser: null
           });
         });
         resolve();
@@ -91,21 +82,19 @@ class DeviceManager {
 
   async addDevice(deviceName) {
     const deviceId = uuidv4();
-
     return new Promise((resolve, reject) => {
       db.run(
         "INSERT INTO devices (id, name, status) VALUES (?, ?, ?)",
         [deviceId, deviceName, "offline"],
         (err) => {
           if (err) return reject(err);
-
           this.devices.set(deviceId, {
             id: deviceId,
             name: deviceName,
             status: "offline",
             client: null,
+            browser: null
           });
-
           resolve(deviceId);
         },
       );
@@ -123,7 +112,15 @@ class DeviceManager {
         ["starting", deviceId],
       );
 
-      // Close existing client if any
+      // Clean up existing sessions
+      if (device.browser) {
+        try {
+          await device.browser.close();
+        } catch (error) {
+          console.error(`Error closing browser: ${error}`);
+        }
+      }
+
       if (device.client) {
         try {
           await device.client.destroy();
@@ -132,7 +129,6 @@ class DeviceManager {
         }
       }
 
-      // Initialize with retries
       let attempts = 0;
       const maxAttempts = 3;
       let success = false;
@@ -142,17 +138,41 @@ class DeviceManager {
         try {
           console.log(`Starting device ${deviceId} (attempt ${attempts}/${maxAttempts})`);
           
-          // Use lightweight browser configuration
-          const browser = await puppeteer.launch({
+          // Get Chromium path for current environment
+          let executablePath = null;
+          if (os.platform() === 'linux') {
+            const possiblePaths = [
+              '/usr/bin/chromium-browser',
+              '/usr/bin/chromium',
+              '/usr/bin/google-chrome',
+              '/usr/bin/google-chrome-stable'
+            ];
+            
+            for (const path of possiblePaths) {
+              if (fs.existsSync(path)) {
+                executablePath = path;
+                break;
+              }
+            }
+          } else if (os.platform() === 'win32') {
+            executablePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+          } else if (os.platform() === 'darwin') {
+            executablePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+          }
+          
+          console.log(`Using Chromium at: ${executablePath || 'default'}`);
+
+          // Launch browser
+          device.browser = await puppeteer.launch({
             headless: true,
             args: [
               "--disable-setuid-sandbox",
+              "--no-sandbox",
               "--disable-dev-shm-usage",
               "--disable-accelerated-2d-canvas",
               "--no-first-run",
               "--no-zygote",
               "--single-process",
-              "--no-sandbox",
               "--disable-gpu",
               "--disable-extensions",
               "--disable-background-networking",
@@ -163,30 +183,19 @@ class DeviceManager {
               "--disable-logging",
               "--disable-software-rasterizer",
               "--disable-web-security",
-              "--disable-breakpad",
-              "--memory-pressure-off",
-              "--mute-audio",
-              "--hide-scrollbars",
               "--remote-debugging-port=0",
               "--remote-debugging-address=0.0.0.0",
-              "--user-agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'"
+              "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
             ],
             ignoreHTTPSErrors: true,
-            executablePath: process.env.CHROME_EXECUTABLE_PATH || "/usr/bin/google-chrome"
+            executablePath: executablePath || undefined
           });
 
           device.client = new Client({
             authStrategy: new LocalAuth({ clientId: deviceId }),
-            puppeteer: { 
-              browser: browser
-            },
-            webVersionCache: {
-              type: 'remote',
-              remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${config.webVersion || '2.2412.54'}.html`,
-            }
+            browser: device.browser
           });
 
-          // Event handlers
           device.client.on("qr", (qr) => {
             this.activeSessions.set(deviceId, qr);
             device.status = "awaiting_qr";
@@ -204,18 +213,12 @@ class DeviceManager {
               ["online", deviceId],
             );
             console.log(`Device ${deviceId} is ready!`);
-            
-            // Setup message listener after ready
             this.setupMessageListener(device.client, deviceId);
           });
 
           device.client.on("disconnected", async (reason) => {
             console.log(`Device ${deviceId} disconnected: ${reason}`);
-            try {
-              await this.handleDeviceDisconnection(deviceId, reason);
-            } catch (error) {
-              console.error(`Error handling disconnection: ${error}`);
-            }
+            await this.handleDeviceDisconnection(deviceId, reason);
           });
 
           device.client.on("auth_failure", (msg) => {
@@ -262,14 +265,24 @@ class DeviceManager {
 
     try {
       device.status = "offline";
+      
       if (device.client) {
         try {
           await device.client.destroy();
         } catch (err) {
           console.error(`Error during client destroy: ${err}`);
         }
+        device.client = null;
       }
-      device.client = null;
+
+      if (device.browser) {
+        try {
+          await device.browser.close();
+        } catch (err) {
+          console.error(`Error during browser close: ${err}`);
+        }
+        device.browser = null;
+      }
 
       db.run(
         "UPDATE devices SET status = ?, last_active = CURRENT_TIMESTAMP WHERE id = ?",
