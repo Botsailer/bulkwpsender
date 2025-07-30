@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhatsApp Bulk Sender</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            'whatsapp': '#128C7E',
+            'whatsapp-dark': '#0C6B5F',
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <div class="container mx-auto px-4 py-8 max-w-7xl">
+    <div class="bg-white rounded-lg shadow-lg p-6">
+      <h1 class="text-3xl font-bold text-whatsapp mb-8 text-center">WhatsApp Bulk Sender</h1>
+      
+      <!-- Device Management -->
+      <section class="mb-8">
+        <h2 class="text-2xl font-semibold text-gray-800 mb-4">Device Management</h2>
+        <div class="flex flex-col sm:flex-row gap-4 mb-6">
+          <input 
+            type="text" 
+            id="deviceName" 
+            placeholder="New device name"
+            class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-whatsapp focus:border-transparent"
+          >
+          <button 
+            id="addDevice"
+            class="bg-whatsapp hover:bg-whatsapp-dark text-white px-6 py-2 rounded-lg transition-colors duration-200 flex items-center gap-2 whitespace-nowrap"
+          >
+            <i class="fas fa-plus"></i> Add Device
+          </button>
+        </div>
+        <div id="deviceList" class="space-y-3 mb-4"></div>
+        <button 
+          id="logoutAll"
+          class="bg-red-500 hover:bg-red-600 text-white px-6 py-2 rounded-lg transition-colors duration-200 flex items-center gap-2"
+        >
+          <i class="fas fa-sign-out-alt"></i> Logout All Devices
+        </button>
+      </section>
+      
+      <!-- Message Editor -->
+      <section class="mb-8">
+        <h2 class="text-2xl font-semibold text-gray-800 mb-4">Message Editor</h2>
+        <div class="flex flex-wrap gap-3 mb-6">
+          <label for="csvFile" class="bg-whatsapp hover:bg-whatsapp-dark text-white px-4 py-2 rounded-lg cursor-pointer transition-colors duration-200 flex items-center gap-2">
+            <i class="fas fa-file-import"></i> Import CSV
+          </label>
+          <input type="file" id="csvFile" accept=".csv" class="hidden">
+          
+          <button id="exportCsv" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors duration-200 flex items-center gap-2">
+            <i class="fas fa-file-export"></i> Export CSV
+          </button>
+          
+          <button id="addColumn" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg transition-colors duration-200 flex items-center gap-2">
+            <i class="fas fa-plus-circle"></i> Add Column
+          </button>
+          
+          <button id="addRow" class="bg-purple-500 hover:bg-purple-600 text-white px-4 py-2 rounded-lg transition-colors duration-200 flex items-center gap-2">
+            <i class="fas fa-plus-square"></i> Add Row
+          </button>
+          
+          <button id="sendMessages" class="bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg transition-colors duration-200 flex items-center gap-2">
+            <i class="fas fa-paper-plane"></i> Send Messages
+          </button>
+        </div>
+        
+        <!-- Status Display -->
+        <div id="uploadStatus" class="mb-4 p-3 rounded-lg bg-gray-100 text-gray-700 hidden"></div>
+        
+        <div class="overflow-auto max-h-96 border border-gray-200 rounded-lg">
+          <table id="messageTable" class="w-full">
+            <thead class="bg-whatsapp text-white sticky top-0">
+              <tr id="tableHeader">
+                <th class="px-4 py-3 text-left">Phone</th>
+                <th class="px-4 py-3 text-left">Message</th>
+                <th class="px-4 py-3 text-center w-32">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="tableBody" class="divide-y divide-gray-200">
+              <!-- Rows will be added here -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+      
+      <!-- Database Management -->
+      <section class="mb-8">
+        <h2 class="text-2xl font-semibold text-gray-800 mb-4">Database</h2>
+        <button 
+          id="clearDB"
+          class="bg-red-500 hover:bg-red-600 text-white px-6 py-2 rounded-lg transition-colors duration-200 flex items-center gap-2"
+        >
+          <i class="fas fa-trash-alt"></i> Clear Message History
+        </button>
+        <p class="text-gray-600 mt-2">Messages automatically delete after 7 days</p>
+      </section>
+    </div>
+    
+    <!-- QR Modal -->
+    <div id="qrModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+      <div class="bg-white rounded-lg p-6 max-w-sm mx-4">
+        <div class="flex justify-between items-center mb-4">
+          <h3 class="text-lg font-semibold">Scan QR Code</h3>
+          <button class="close text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+        </div>
+        <img id="qrCodeImg" alt="WhatsApp QR Code" class="max-w-full mx-auto block">
+        <p class="text-center text-gray-600 mt-4">Scan with WhatsApp on your phone</p>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Include libraries -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      // DOM Elements
+      const deviceList = document.getElementById('deviceList');
+      const addDeviceBtn = document.getElementById('addDevice');
+      const logoutAllBtn = document.getElementById('logoutAll');
+      const csvFileInput = document.getElementById('csvFile');
+      const exportCsvBtn = document.getElementById('exportCsv');
+      const addColumnBtn = document.getElementById('addColumn');
+      const addRowBtn = document.getElementById('addRow');
+      const sendMessagesBtn = document.getElementById('sendMessages');
+      const clearDBBtn = document.getElementById('clearDB');
+      const qrModal = document.getElementById('qrModal');
+      const qrCodeImg = document.getElementById('qrCodeImg');
+      const closeModal = document.querySelector('.close');
+      const tableBody = document.getElementById('tableBody');
+      const tableHeader = document.getElementById('tableHeader');
+      const uploadStatus = document.getElementById('uploadStatus');
+      
+      // Table data structure
+      let tableData = [];
+      let columns = ['phone', 'message'];
+      
+      // Initialize with empty row
+      if (tableData.length === 0) {
+        addRow();
+      }
+      
+      // Load devices on startup
+      loadDevices();
+      
+      // Show status message
+      function showStatus(message, type = 'info') {
+        uploadStatus.textContent = message;
+        uploadStatus.className = `mb-4 p-3 rounded-lg ${
+          type === 'success' ? 'bg-green-100 text-green-700' :
+          type === 'error' ? 'bg-red-100 text-red-700' :
+          type === 'warning' ? 'bg-yellow-100 text-yellow-700' :
+          'bg-blue-100 text-blue-700'
+        }`;
+        uploadStatus.classList.remove('hidden');
+        
+        // Auto hide after 5 seconds for non-error messages
+        if (type !== 'error') {
+          setTimeout(() => {
+            uploadStatus.classList.add('hidden');
+          }, 5000);
+        }
+      }
+      
+      // Add new device
+      addDeviceBtn.addEventListener('click', async () => {
+        const deviceName = document.getElementById('deviceName').value.trim();
+        if (!deviceName) {
+          showStatus('Please enter a device name', 'warning');
+          return;
+        }
+        
+        try {
+          addDeviceBtn.disabled = true;
+          addDeviceBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Adding...';
+          
+          const response = await fetch('/add-device', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceName })
+          });
+          
+          const data = await response.json();
+          if (data.success) {
+            document.getElementById('deviceName').value = '';
+            showStatus('Device added successfully', 'success');
+            loadDevices();
+          } else {
+            showStatus('Failed to add device: ' + (data.error || 'Unknown error'), 'error');
+          }
+        } catch (err) {
+          console.error('Add device error:', err);
+          showStatus('Failed to add device: ' + err.message, 'error');
+        } finally {
+          addDeviceBtn.disabled = false;
+          addDeviceBtn.innerHTML = '<i class="fas fa-plus"></i> Add Device';
+        }
+      });
+      
+      // Logout all devices
+      logoutAllBtn.addEventListener('click', async () => {
+        if (!confirm('Are you sure you want to logout all devices?')) return;
+        
+        try {
+          logoutAllBtn.disabled = true;
+          logoutAllBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Logging out...';
+          
+          const response = await fetch('/logout-all', { method: 'POST' });
+          const data = await response.json();
+          if (data.success) {
+            showStatus('All devices logged out', 'success');
+            loadDevices();
+          } else {
+            showStatus('Failed to logout devices', 'error');
+          }
+        } catch (err) {
+          console.error('Logout error:', err);
+          showStatus('Failed to logout devices: ' + err.message, 'error');
+        } finally {
+          logoutAllBtn.disabled = false;
+          logoutAllBtn.innerHTML = '<i class="fas fa-sign-out-alt"></i> Logout All Devices';
+        }
+      });
+      
+      // Import CSV
+      csvFileInput.addEventListener('change', handleCsvImport);
+      
+      // Export CSV
+      exportCsvBtn.addEventListener('click', exportToCsv);
+      
+      // Add column
+      addColumnBtn.addEventListener('click', addColumn);
+      
+      // Add row
+      addRowBtn.addEventListener('click', addRow);
+      
+      // Send messages
+      sendMessagesBtn.addEventListener('click', sendMessages);
+      
+      // Clear database
+      clearDBBtn.addEventListener('click', async () => {
+        if (!confirm('Clear all message history? This cannot be undone.')) return;
+        
+        try {
+          const response = await fetch('/clear-db', { method: 'DELETE' });
+          const data = await response.json();
+          showStatus(data.success ? 'Database cleared successfully' : 'Error clearing database', 
+                    data.success ? 'success' : 'error');
+        } catch (err) {
+          console.error('Clear DB error:', err);
+          showStatus('Failed to clear database: ' + err.message, 'error');
+        }
+      });
+      
+      // Modal controls
+      closeModal.addEventListener('click', () => {
+        qrModal.classList.add('hidden');
+        qrModal.classList.remove('flex');
+      });
+      
+      qrModal.addEventListener('click', (e) => {
+        if (e.target === qrModal) {
+          qrModal.classList.add('hidden');
+          qrModal.classList.remove('flex');
+        }
+      });
+      
+      // Load devices from server
+      async function loadDevices() {
+        try {
+          const response = await fetch('/devices');
+          const devices = await response.json();
+          
+          deviceList.innerHTML = '';
+          
+          if (devices.length === 0) {
+            deviceList.innerHTML = '<p class="text-gray-500 text-center py-4">No devices added yet</p>';
+            return;
+          }
+          
+          devices.forEach(device => {
+            const statusColor = {
+              'online': 'bg-green-500',
+              'offline': 'bg-gray-400',
+              'awaiting_qr': 'bg-yellow-500',
+              'error': 'bg-red-500',
+              'auth_failed': 'bg-red-600'
+            }[device.status] || 'bg-gray-400';
+            
+            const card = document.createElement('div');
+            card.className = 'bg-gray-50 border border-gray-200 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4';
+            card.innerHTML = `
+              <div class="flex items-center gap-3">
+                <div class="w-3 h-3 ${statusColor} rounded-full"></div>
+                <div>
+                  <span class="font-semibold text-gray-800">${device.name}</span>
+                  <span class="text-sm text-gray-600 ml-2">(${device.status.replace('_', ' ')})</span>
+                </div>
+              </div>
+              <div class="flex gap-2 flex-wrap">
+                ${device.status === 'awaiting_qr' ? 
+                  `<button class="show-qr bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded text-sm transition-colors" data-id="${device.id}">Show QR</button>` : 
+                  ''
+                }
+                <button class="start-device bg-whatsapp hover:bg-whatsapp-dark text-white px-3 py-1 rounded text-sm transition-colors" data-id="${device.id}">
+                  ${device.status === 'offline' || device.status === 'error' || device.status === 'auth_failed' ? 'Start' : 'Restart'}
+                </button>
+                <button class="logout-device bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded text-sm transition-colors" data-id="${device.id}">Logout</button>
+              </div>
+            `;
+            deviceList.appendChild(card);
+          });
+          
+          // Add event listeners to buttons
+          document.querySelectorAll('.show-qr').forEach(btn => {
+            btn.addEventListener('click', showQRCode);
+          });
+          
+          document.querySelectorAll('.start-device').forEach(btn => {
+            btn.addEventListener('click', startDevice);
+          });
+          
+          document.querySelectorAll('.logout-device').forEach(btn => {
+            btn.addEventListener('click', logoutDevice);
+          });
+        } catch (err) {
+          console.error('Load devices error:', err);
+          deviceList.innerHTML = '<p class="text-red-500 text-center py-4">Error loading devices</p>';
+        }
+      }
+      
+      // Show QR Code
+      async function showQRCode(e) {
+        const deviceId = e.target.dataset.id;
+        const qrImg = document.getElementById('qrCodeImg');
+        qrImg.src = '';
+        
+        try {
+          const response = await fetch(`/qr-code/${deviceId}`);
+          const data = await response.json();
+          
+          if (data.qrImage) {
+            qrImg.src = data.qrImage;
+            qrModal.classList.remove('hidden');
+            qrModal.classList.add('flex');
+          } else {
+            showStatus('QR code not available', 'warning');
+          }
+        } catch (err) {
+          console.error('QR fetch error:', err);
+          showStatus('Failed to get QR code: ' + err.message, 'error');
+        }
+      }
+      
+      // Start device
+      async function startDevice(e) {
+        const deviceId = e.target.dataset.id;
+        const originalText = e.target.innerHTML;
+        e.target.disabled = true;
+        e.target.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting...';
+        
+        try {
+          const response = await fetch(`/start-device/${deviceId}`, { 
+            method: 'POST' 
+          });
+          const data = await response.json();
+          
+          if (data.status) {
+            showStatus('Device initialization started', 'success');
+            setTimeout(() => loadDevices(), 2000); // Refresh after 2 seconds
+          }
+        } catch (err) {
+          console.error('Start device error:', err);
+          showStatus('Failed to start device: ' + err.message, 'error');
+        } finally {
+          e.target.disabled = false;
+          e.target.innerHTML = originalText;
+        }
+      }
+      
+      // Logout device
+      async function logoutDevice(e) {
+        const deviceId = e.target.dataset.id;
+        
+        if (!confirm('Logout this device?')) return;
+        
+        try {
+          e.target.disabled = true;
+          e.target.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+          
+          await fetch(`/logout-device/${deviceId}`, { method: 'POST' });
+          showStatus('Device logged out', 'success');
+          loadDevices();
+        } catch (err) {
+          console.error('Logout device error:', err);
+          showStatus('Failed to logout device: ' + err.message, 'error');
+        }
+      }
+      
+      // Handle CSV import
+      function handleCsvImport(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+        
+        Papa.parse(file, {
+          header: true,
+          skipEmptyLines: true,
+          complete: (results) => {
+            if (results.errors.length) {
+              showStatus(`CSV parse errors: ${results.errors.map(e => e.message).join(', ')}`, 'error');
+              return;
+            }
+            
+            // Extract all unique columns from CSV
+            const csvColumns = new Set(['phone', 'message']);
+            results.data.forEach(row => {
+              Object.keys(row).forEach(key => {
+                if (key.trim()) csvColumns.add(key.trim());
+              });
+            });
+            
+            // Update columns
+            columns = Array.from(csvColumns);
+            updateTableHeader();
+            
+            // Store data and render table
+            tableData = results.data.map(row => {
+              const cleanRow = {};
+              Object.keys(row).forEach(key => {
+                cleanRow[key.trim()] = row[key];
+              });
+              return cleanRow;
+            });
+            renderTable();
+            
+            showStatus(`Imported ${tableData.length} rows successfully`, 'success');
+            
+            // Reset file input
+            event.target.value = '';
+          },
+          error: (error) => {
+            console.error('CSV parse error:', error);
+            showStatus('Failed to parse CSV file: ' + error.message, 'error');
+          }
+        });
+      }
+      
+      // Export to CSV
+      function exportToCsv() {
+        if (tableData.length === 0) {
+          showStatus('No data to export', 'warning');
+          return;
+        }
+        
+        // Create CSV content
+        const csvContent = [
+          columns.join(','),
+          ...tableData.map(row => 
+            columns.map(col => 
+              `"${(row[col] || '').toString().replace(/"/g, '""')}"`
+            ).join(',')
+          )
+        ].join('\n');
+        
+        // Create download link
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.setAttribute('href', url);
+        link.setAttribute('download', `messages_${new Date().toISOString().slice(0, 10)}.csv`);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        showStatus('CSV exported successfully', 'success');
+      }
+      
+      // Add new column
+      function addColumn() {
+        const colName = prompt('Enter column name:');
+        if (!colName || columns.includes(colName)) {
+          if (colName && columns.includes(colName)) {
+            showStatus('Column already exists', 'warning');
+          }
+          return;
+        }
+        
+        columns.push(colName);
+        updateTableHeader();
+        
+        // Add empty value for new column in all rows
+        tableData.forEach(row => {
+          if (!row[colName]) row[colName] = '';
+        });
+        
+        renderTable();
+      }
+      
+      // Add new row
+      function addRow() {
+        const newRow = {};
+        columns.forEach(col => {
+          newRow[col] = '';
+        });
+        tableData.push(newRow);
+        renderTable();
+      }
+      
+      // Update table header
+      function updateTableHeader() {
+        tableHeader.innerHTML = `
+          ${columns.map(col => `
+            <th class="px-4 py-3 text-left">
+              <div class="flex items-center justify-between">
+                <span class="capitalize">${col}</span>
+                ${col !== 'phone' && col !== 'message' ? `
+                  <button class="delete-col text-red-400 hover:text-red-600 ml-2" data-col="${col}">
+                    <i class="fas fa-times text-xs"></i>
+                  </button>
+                ` : ''}
+              </div>
+            </th>
+          `).join('')}
+          <th class="px-4 py-3 text-center w-32">Actions</th>
+        `;
+        
+        // Add event listeners to delete column buttons
+        document.querySelectorAll('.delete-col').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const colName = e.target.closest('button').dataset.col;
+            deleteColumn(colName);
+          });
+        });
+      }
+      
+      // Delete column
+      function deleteColumn(colName) {
+        if (!confirm(`Delete column "${colName}"? This will remove all data in this column.`)) return;
+        
+        columns = columns.filter(col => col !== colName);
+        tableData.forEach(row => {
+          delete row[colName];
+        });
+        
+        updateTableHeader();
+        renderTable();
+      }
+      
+      // Render table body
+      function renderTable() {
+        tableBody.innerHTML = '';
+        
+        if (tableData.length === 0) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td colspan="${columns.length + 1}" class="px-4 py-8 text-center text-gray-500">No data available. Add a row or import CSV.</td>`;
+          tableBody.appendChild(tr);
+          return;
+        }
+        
+        tableData.forEach((row, rowIndex) => {
+          const tr = document.createElement('tr');
+          tr.className = 'hover:bg-gray-50';
+          
+          // Add data cells
+          columns.forEach(col => {
+            const td = document.createElement('td');
+            td.className = 'px-4 py-3';
+            
+            if (col === 'message') {
+              const textarea = document.createElement('textarea');
+              textarea.value = row[col] || '';
+              textarea.placeholder = 'Enter message';
+              textarea.className = 'w-full px-2 py-1 border border-gray-300 rounded resize-none focus:ring-2 focus:ring-whatsapp focus:border-transparent';
+              textarea.rows = 2;
+              textarea.addEventListener('change', (e) => {
+                tableData[rowIndex][col] = e.target.value;
+              });
+              td.appendChild(textarea);
+            } else {
+              const input = document.createElement('input');
+              input.type = 'text';
+              input.value = row[col] || '';
+              input.placeholder = col === 'phone' ? 'e.g. 9130390316' : `Enter ${col}`;
+              input.className = 'w-full px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-whatsapp focus:border-transparent';
+              input.addEventListener('change', (e) => {
+                tableData[rowIndex][col] = e.target.value;
+              });
+              td.appendChild(input);
+            }
+            
+            tr.appendChild(td);
+          });
+          
+          // Add action cell
+          const actionTd = document.createElement('td');
+          actionTd.className = 'px-4 py-3 text-center';
+          actionTd.innerHTML = `
+            <div class="flex justify-center gap-1">
+              <button class="move-up text-blue-500 hover:text-blue-700 p-1" title="Move up">
+                <i class="fas fa-arrow-up text-xs"></i>
+              </button>
+              <button class="move-down text-blue-500 hover:text-blue-700 p-1" title="Move down">
+                <i class="fas fa-arrow-down text-xs"></i>
+              </button>
+              <button class="delete-row text-red-500 hover:text-red-700 p-1" title="Delete row">
+                <i class="fas fa-trash text-xs"></i>
+              </button>
+            </div>
+          `;
+          tr.appendChild(actionTd);
+          
+          tableBody.appendChild(tr);
+        });
+        
+        // Add event listeners to action buttons
+        document.querySelectorAll('.move-up').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const rowIndex = Array.from(tableBody.children).indexOf(
+              e.target.closest('tr')
+            );
+            if (rowIndex > 0) {
+              moveRow(rowIndex, rowIndex - 1);
+            }
+          });
+        });
+        
+        document.querySelectorAll('.move-down').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const rowIndex = Array.from(tableBody.children).indexOf(
+              e.target.closest('tr')
+            );
+            if (rowIndex < tableData.length - 1) {
+              moveRow(rowIndex, rowIndex + 1);
+            }
+          });
+        });
+        
+        document.querySelectorAll('.delete-row').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const rowIndex = Array.from(tableBody.children).indexOf(
+              e.target.closest('tr')
+            );
+            if (confirm('Delete this row?')) {
+              tableData.splice(rowIndex, 1);
+              renderTable();
+            }
+          });
+        });
+      }
+      
+      // Move row
+      function moveRow(fromIndex, toIndex) {
+        const row = tableData.splice(fromIndex, 1)[0];
+        tableData.splice(toIndex, 0, row);
+        renderTable();
+      }
+      
+      // Send messages
+      async function sendMessages() {
+        if (tableData.length === 0) {
+          showStatus('No messages to send', 'warning');
+          return;
+        }
+        
+        // Validate data
+        const invalidRows = [];
+        const messagesToSend = [];
+        
+        tableData.forEach((row, index) => {
+          const phone = (row.phone || '').toString().trim();
+          const message = (row.message || '').toString().trim();
+          
+          if (!phone || !message) {
+            invalidRows.push(index + 1);
+            return;
+          }
+          
+          // Clean phone number - remove all non-digits
+          const cleanPhone = phone.replace(/\D/g, '');
+          if (cleanPhone.length < 10) {
+            invalidRows.push(index + 1);
+            return;
+          }
+          
+          messagesToSend.push({
+            phone: cleanPhone,
+            message: message
+          });
+        });
+        
+        if (invalidRows.length > 0) {
+          showStatus(`Rows ${invalidRows.join(', ')} have invalid phone numbers or empty messages`, 'error');
+          return;
+        }
+        
+        if (messagesToSend.length === 0) {
+          showStatus('No valid messages to send', 'warning');
+          return;
+        }
+        
+        // Disable send button and show progress
+        sendMessagesBtn.disabled = true;
+        sendMessagesBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...';
+        
+        showStatus(`Sending ${messagesToSend.length} messages...`, 'info');
+        
+        try {
+          const response = await fetch('/upload-csv', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(messagesToSend)
+          });
+          
+          const data = await response.json();
+          if (data.success) {
+            showStatus(`Successfully queued ${messagesToSend.length} messages for sending`, 'success');
+          } else {
+            showStatus('Failed to send messages: ' + (data.error || 'Unknown error'), 'error');
+          }
+        } catch (err) {
+          console.error('Send messages error:', err);
+          showStatus('Error sending messages: ' + err.message, 'error');
+        } finally {
+          sendMessagesBtn.disabled = false;
+          sendMessagesBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Messages';
+        }
+      }
+      
+      // Auto-refresh devices every 10 seconds
+      setInterval(loadDevices, 10000);
+      
+      // Initialize table with empty row
+      updateTableHeader();
+      renderTable();
+    });
+  </script>
+</body>
+</html>
