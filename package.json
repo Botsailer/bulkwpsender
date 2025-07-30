@@ -21,7 +21,7 @@
     "express": "^5.1.0",
     "express-fileupload": "^1.5.2",
     "node-cron": "^4.2.1",
-    "puppeteer-core": "^22.15.0",  // Changed to puppeteer-core
+    "puppeteer-core": "^22.15.0",
     "qrcode": "^1.5.4",
     "sqlite3": "^5.1.7",
     "uuid": "^11.1.0",
