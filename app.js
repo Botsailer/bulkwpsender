@@ -9,6 +9,7 @@ const cron = require("node-cron");
 const sqlite3 = require("sqlite3").verbose();
 const { v4: uuidv4 } = require("uuid");
 const puppeteer = require("puppeteer");
+const qrcode = require("qrcode");
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -18,7 +19,7 @@ app.use(express.static("public"));
 
 const config = require("./config.json");
 
-// Handle unhandled rejections gracefully without crashing
+// Handle unhandled rejections gracefully
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason);
 });
@@ -29,6 +30,7 @@ process.on("uncaughtException", (err) => {
 
 const db = new sqlite3.Database("messages.db");
 db.serialize(() => {
+  // Create tables
   db.run(`
     CREATE TABLE IF NOT EXISTS sent_messages (
       id TEXT PRIMARY KEY,
@@ -48,6 +50,19 @@ db.serialize(() => {
       last_active DATETIME
     )
   `);
+  
+  // New table for pending messages
+  db.run(`
+    CREATE TABLE IF NOT EXISTS pending_messages (
+      id TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      message TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      hi_sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      hi_message_id TEXT,
+      status TEXT DEFAULT 'pending_reply'
+    )
+  `);
 });
 
 // Device Manager
@@ -55,6 +70,7 @@ class DeviceManager {
   constructor() {
     this.devices = new Map();
     this.activeSessions = new Map();
+    this.messageListeners = new Map();
   }
 
   async init() {
@@ -187,6 +203,9 @@ class DeviceManager {
               ["online", deviceId],
             );
             console.log(`Device ${deviceId} is ready!`);
+            
+            // Setup message listener after ready
+            this.setupMessageListener(device.client, deviceId);
           });
 
           device.client.on("disconnected", async (reason) => {
@@ -322,30 +341,30 @@ class DeviceManager {
 
       console.log(`Sending to ${formattedPhone} via ${device.id}`);
 
-      // Insert into DB first
+      // STEP 1: Send "Hi" message
+      const hiMessage = "Hi";
+      const hiMsgResult = await device.client.sendMessage(whatsappId, hiMessage);
+      
+      // Store in pending messages table
       await new Promise((resolve, reject) => {
         db.run(
-          "INSERT INTO sent_messages (id, phone, message, device_id) VALUES (?, ?, ?, ?)",
-          [msgId, formattedPhone, message, device.id],
+          `INSERT INTO pending_messages 
+          (id, phone, message, device_id, hi_message_id) 
+          VALUES (?, ?, ?, ?, ?)`,
+          [msgId, formattedPhone, message, device.id, hiMsgResult.id.id],
           (err) => (err ? reject(err) : resolve())
         );
       });
 
-      // Verify connection state
-      const state = await device.client.getState();
-      if (state !== "CONNECTED") {
-        throw new Error(`Device not connected (state: ${state})`);
-      }
-
-      // Send message
-      await device.client.sendMessage(whatsappId, message);
-      db.run("UPDATE sent_messages SET status = ? WHERE id = ?", ["sent", msgId]);
-
-      console.log(`✓ Sent to ${formattedPhone}`);
-      return { success: true, deviceId: device.id, messageId: msgId };
+      console.log(`✓ Sent 'Hi' to ${formattedPhone}`);
+      return { 
+        success: true, 
+        deviceId: device.id, 
+        messageId: msgId,
+        status: 'pending_reply'
+      };
     } catch (err) {
-      console.error(`✗ Failed to send: ${err.message}`);
-      db.run("UPDATE sent_messages SET status = ? WHERE id = ?", ["failed", msgId]);
+      console.error(`✗ Failed to send 'Hi': ${err.message}`);
 
       if (err.message.includes("Evaluation failed") || 
           err.message.includes("Target closed") ||
@@ -356,6 +375,74 @@ class DeviceManager {
 
       throw new Error(`Failed to send: ${err.message}`);
     }
+  }
+
+  setupMessageListener(client, deviceId) {
+    // Remove existing listener if any
+    if (this.messageListeners.has(deviceId)) {
+      client.removeListener('message', this.messageListeners.get(deviceId));
+    }
+    
+    const messageHandler = async (msg) => {
+      // Ignore our own messages and group messages
+      if (msg.fromMe || msg.isGroupMsg) return;
+      
+      // Extract phone number
+      const sender = msg.from.replace(/\D/g, '');
+      const formattedSender = sender.length === 10 ? "91" + sender : sender;
+      
+      console.log(`Received reply from ${formattedSender} on device ${deviceId}`);
+
+      try {
+        // Check for pending message
+        const pending = await new Promise((resolve, reject) => {
+          db.get(
+            `SELECT * FROM pending_messages 
+            WHERE phone = ? AND device_id = ? AND status = 'pending_reply'`,
+            [formattedSender, deviceId],
+            (err, row) => (err ? reject(err) : resolve(row))
+          );
+        });
+
+        if (pending) {
+          console.log(`Processing pending message for ${formattedSender}`);
+          const whatsappId = formattedSender + "@c.us";
+          
+          // Send actual message
+          await client.sendMessage(whatsappId, pending.message);
+          
+          // Move to sent messages
+          await new Promise((resolve, reject) => {
+            db.serialize(() => {
+              db.run(
+                `INSERT INTO sent_messages 
+                (id, phone, message, device_id) 
+                VALUES (?, ?, ?, ?)`,
+                [pending.id, pending.phone, pending.message, pending.device_id],
+                (err) => {
+                  if (err) return reject(err);
+                  
+                  db.run(
+                    "DELETE FROM pending_messages WHERE id = ?",
+                    [pending.id],
+                    (err) => (err ? reject(err) : resolve())
+                  );
+                }
+              );
+            });
+          });
+
+          console.log(`✓ Sent real message to ${formattedSender}`);
+        }
+      } catch (err) {
+        console.error(`Error processing reply: ${err.message}`);
+      }
+    };
+
+    // Add new listener and store reference
+    client.on('message', messageHandler);
+    this.messageListeners.set(deviceId, messageHandler);
+    console.log(`Message listener set up for device ${deviceId}`);
   }
 
   async restartDevice(deviceId) {
@@ -379,11 +466,21 @@ deviceManager.init().catch((err) => console.error("Device init error:", err));
 
 // Auto-clean old messages
 cron.schedule("0 0 * * *", () => {
+  // Clean sent messages older than 7 days
   db.run(
     "DELETE FROM sent_messages WHERE sent_at < datetime('now', '-7 days')",
     (err) => {
-      if (err) console.error("Cleanup error:", err);
-      else console.log("Old messages cleaned");
+      if (err) console.error("Sent messages cleanup error:", err);
+      else console.log("Old sent messages cleaned");
+    }
+  );
+  
+  // Clean pending messages older than 30 days
+  db.run(
+    "DELETE FROM pending_messages WHERE hi_sent_at < datetime('now', '-30 days')",
+    (err) => {
+      if (err) console.error("Pending messages cleanup error:", err);
+      else console.log("Old pending messages cleaned");
     }
   );
 });
@@ -429,7 +526,7 @@ app.get("/qr-code/:deviceId", async (req, res) => {
     if (!qrData) return res.status(404).json({ error: "QR not available" });
 
     const qrImage = await new Promise((resolve) => {
-      require("qrcode").toDataURL(qrData, (err, url) => {
+      qrcode.toDataURL(qrData, (err, url) => {
         resolve(err ? null : url);
       });
     });
@@ -511,7 +608,7 @@ async function processMessages(messages) {
     try {
       await deviceManager.sendMessage(msg.phone, msg.message);
       successCount++;
-      console.log(`Sent ${index + 1}/${messages.length} to ${msg.phone}`);
+      console.log(`Initiated ${index + 1}/${messages.length} to ${msg.phone}`);
       
       // Add delay between messages except last one
       if (index < messages.length - 1) {
@@ -522,13 +619,23 @@ async function processMessages(messages) {
     }
   }
 
-  console.log(`Completed: ${successCount} successful, ${messages.length - successCount} failed`);
+  console.log(`Completed: ${successCount} initiated, ${messages.length - successCount} failed`);
 }
 
 app.delete("/clear-db", (req, res) => {
   db.run("DELETE FROM sent_messages", (err) => {
     if (err) return res.status(500).json({ error: err.message });
+  });
+  db.run("DELETE FROM pending_messages", (err) => {
+    if (err) return res.status(500).json({ error: err.message });
     res.json({ success: true });
+  });
+});
+
+app.get("/pending-messages", (req, res) => {
+  db.all("SELECT * FROM pending_messages", [], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
   });
 });
 
