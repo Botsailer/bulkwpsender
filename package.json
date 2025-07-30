@@ -1,7 +1,7 @@
 {
-  "name": "wpsender",
+  "name": "whatsapp-bulk-sender",
   "version": "1.0.0",
-  "description": "WhatsApp bulk message sender",
+  "description": "WhatsApp Bulk Message Sender with Two-Step Verification",
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
@@ -10,18 +10,18 @@
   "keywords": [
     "whatsapp",
     "bulk",
-    "sender",
-    "messaging"
+    "messaging",
+    "automation"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "Your Name",
+  "license": "MIT",
   "dependencies": {
     "csv-parser": "^3.2.0",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "express-fileupload": "^1.5.2",
     "node-cron": "^4.2.1",
-    "puppeteer-core": "^22.15.0",
+    "puppeteer": "^22.15.0",
     "qrcode": "^1.5.4",
     "sqlite3": "^5.1.7",
     "uuid": "^11.1.0",
