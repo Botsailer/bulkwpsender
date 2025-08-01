@@ -54,6 +54,16 @@ db.serialize(() => {
       status TEXT DEFAULT 'pending_reply'
     )
   `);
+
+  // Add reconnect_attempts column if it doesn't exist
+  db.run(`
+    ALTER TABLE devices ADD COLUMN reconnect_attempts INTEGER DEFAULT 0
+  `, (err) => {
+    // Ignore "duplicate column" errors
+    if (err && !err.message.includes("duplicate column")) {
+      console.error("Error adding reconnect_attempts column:", err);
+    }
+  });
 });
 
 // Device Manager
@@ -62,6 +72,9 @@ class DeviceManager {
     this.devices = new Map();
     this.activeSessions = new Map();
     this.messageListeners = new Map();
+    this.reconnectTimers = new Map();
+    this.MAX_RECONNECT_ATTEMPTS = 10;
+    this.RECONNECT_BASE_DELAY = 5000; // 5 seconds
   }
 
   async init() {
@@ -72,7 +85,8 @@ class DeviceManager {
           this.devices.set(row.id, {
             ...row,
             client: null,
-            browser: null
+            browser: null,
+            reconnectAttempts: row.reconnect_attempts || 0
           });
         });
         resolve();
@@ -93,7 +107,8 @@ class DeviceManager {
             name: deviceName,
             status: "offline",
             client: null,
-            browser: null
+            browser: null,
+            reconnectAttempts: 0
           });
           resolve(deviceId);
         },
@@ -101,33 +116,23 @@ class DeviceManager {
     });
   }
 
-async startDevice(deviceId) {
+  async startDevice(deviceId) {
     const device = this.devices.get(deviceId);
     if (!device) throw new Error("Device not found");
 
+    // Clear any existing reconnect timer
+    this.clearReconnectTimer(deviceId);
+
     try {
       device.status = "starting";
+      device.reconnectAttempts = 0; // Reset attempts on manual start
       db.run(
-        "UPDATE devices SET status = ?, last_active = CURRENT_TIMESTAMP WHERE id = ?",
-        ["starting", deviceId],
+        "UPDATE devices SET status = ?, last_active = CURRENT_TIMESTAMP, reconnect_attempts = ? WHERE id = ?",
+        ["starting", 0, deviceId],
       );
 
       // Clean up existing sessions
-      if (device.browser) {
-        try {
-          await device.browser.close();
-        } catch (error) {
-          console.error(`Error closing browser: ${error}`);
-        }
-      }
-
-      if (device.client) {
-        try {
-          await device.client.destroy();
-        } catch (error) {
-          console.error(`Error destroying client: ${error}`);
-        }
-      }
+      await this.cleanupDeviceResources(deviceId);
 
       let attempts = 0;
       const maxAttempts = 3;
@@ -146,7 +151,12 @@ async startDevice(deviceId) {
 
           device.client = new Client({
             authStrategy: new LocalAuth({ clientId: deviceId }),
-            browser: device.browser
+            browser: device.browser,
+            puppeteer: {
+              handleSIGINT: false,
+              handleSIGTERM: false,
+              handleSIGHUP: false
+            }
           });
 
           device.client.on("qr", (qr) => {
@@ -161,11 +171,15 @@ async startDevice(deviceId) {
 
           device.client.on("ready", () => {
             device.status = "online";
+            device.reconnectAttempts = 0; // Reset on successful connection
             db.run(
-              "UPDATE devices SET status = ?, last_active = CURRENT_TIMESTAMP WHERE id = ?",
-              ["online", deviceId],
+              "UPDATE devices SET status = ?, last_active = CURRENT_TIMESTAMP, reconnect_attempts = ? WHERE id = ?",
+              ["online", 0, deviceId],
             );
             console.log(`Device ${deviceId} is ready!`);
+            
+            // Set up message listener when device is ready
+            this.setupMessageListener(device.client, deviceId);
           });
 
           device.client.on("disconnected", async (reason) => {
@@ -194,17 +208,12 @@ async startDevice(deviceId) {
           console.error(`Attempt ${attempts} failed:`, err.message);
           
           // Clean up failed attempt
-          if (device.browser) {
-            try {
-              await device.browser.close();
-            } catch (cleanupError) {
-              console.error(`Error cleaning up browser on failed attempt:`, cleanupError);
-            }
-          }
+          await this.cleanupDeviceResources(deviceId);
           
           if (attempts < maxAttempts) {
-            console.log(`Waiting ${2000 * attempts}ms before retry...`);
-            await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
+            const delay = 2000 * attempts;
+            console.log(`Waiting ${delay}ms before retry...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
           } else {
             throw new Error(`Start failed after ${maxAttempts} attempts: ${err.message}`);
           }
@@ -220,7 +229,50 @@ async startDevice(deviceId) {
         "UPDATE devices SET status = ?, last_active = CURRENT_TIMESTAMP WHERE id = ?",
         ["error", deviceId],
       );
+      
+      // Schedule automatic reconnection
+      this.scheduleReconnect(deviceId);
       throw err;
+    }
+  }
+
+  async cleanupDeviceResources(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device) return;
+
+    try {
+      // Clean up message listener
+      if (this.messageListeners.has(deviceId)) {
+        const listener = this.messageListeners.get(deviceId);
+        if (device.client) {
+          device.client.removeListener('message', listener);
+        }
+        this.messageListeners.delete(deviceId);
+        console.log(`🧹 Cleaned up message listener for device ${deviceId}`);
+      }
+
+      if (device.client) {
+        try {
+          await device.client.destroy();
+        } catch (error) {
+          console.error(`Error destroying client: ${error}`);
+        }
+        device.client = null;
+      }
+
+      if (device.browser) {
+        try {
+          if (device.browser.process() != null) {
+            device.browser.process().kill('SIGINT');
+          }
+          await device.browser.close();
+        } catch (error) {
+          console.error(`Error closing browser: ${error}`);
+        }
+        device.browser = null;
+      }
+    } catch (error) {
+      console.error(`Resource cleanup error for device ${deviceId}:`, error);
     }
   }
 
@@ -356,24 +408,10 @@ async startDevice(deviceId) {
     try {
       device.status = "offline";
       
-      if (device.client) {
-        try {
-          await device.client.destroy();
-        } catch (err) {
-          console.error(`Error during client destroy: ${err}`);
-        }
-        device.client = null;
-      }
-
-      if (device.browser) {
-        try {
-          await device.browser.close();
-        } catch (err) {
-          console.error(`Error during browser close: ${err}`);
-        }
-        device.browser = null;
-      }
-
+      // Clean up resources
+      await this.cleanupDeviceResources(deviceId);
+      
+      // Update database
       db.run(
         "UPDATE devices SET status = ?, last_active = CURRENT_TIMESTAMP WHERE id = ?",
         ["offline", deviceId],
@@ -381,8 +419,63 @@ async startDevice(deviceId) {
 
       this.activeSessions.delete(deviceId);
       console.log(`Device ${deviceId} disconnected and cleaned up`);
+
+      // Schedule reconnection unless it was a manual logout
+      if (reason !== "manual_logout" && reason !== "restart") {
+        this.scheduleReconnect(deviceId);
+      }
     } catch (error) {
       console.error(`Disconnection error: ${error}`);
+    }
+  }
+
+  scheduleReconnect(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device) return;
+
+    // Clear any existing timer
+    this.clearReconnectTimer(deviceId);
+
+    // Increment reconnect attempts
+    device.reconnectAttempts = (device.reconnectAttempts || 0) + 1;
+    db.run(
+      "UPDATE devices SET reconnect_attempts = ? WHERE id = ?",
+      [device.reconnectAttempts, deviceId],
+    );
+
+    // Check max attempts
+    if (device.reconnectAttempts > this.MAX_RECONNECT_ATTEMPTS) {
+      console.error(`❌ Device ${deviceId} reconnect attempts exhausted (${this.MAX_RECONNECT_ATTEMPTS} attempts)`);
+      device.status = "offline";
+      db.run(
+        "UPDATE devices SET status = ? WHERE id = ?",
+        ["offline", deviceId],
+      );
+      return;
+    }
+
+    // Calculate delay with exponential backoff
+    const delay = Math.min(
+      this.RECONNECT_BASE_DELAY * Math.pow(2, device.reconnectAttempts - 1),
+      300000 // Max 5 minutes
+    );
+
+    console.log(`⏱ Scheduling reconnect for device ${deviceId} (attempt ${device.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS}) in ${delay}ms`);
+
+    const timer = setTimeout(() => {
+      console.log(`🔌 Attempting to reconnect device ${deviceId} (attempt ${device.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})`);
+      this.startDevice(deviceId).catch(err => {
+        console.error(`Reconnect attempt failed: ${err.message}`);
+      });
+    }, delay);
+
+    this.reconnectTimers.set(deviceId, timer);
+  }
+
+  clearReconnectTimer(deviceId) {
+    if (this.reconnectTimers.has(deviceId)) {
+      clearTimeout(this.reconnectTimers.get(deviceId));
+      this.reconnectTimers.delete(deviceId);
     }
   }
 
@@ -392,6 +485,9 @@ async startDevice(deviceId) {
 
     console.log(`Logging out device ${deviceId}`);
     try {
+      // Prevent automatic reconnection
+      this.clearReconnectTimer(deviceId);
+      
       await this.handleDeviceDisconnection(deviceId, "manual_logout");
       db.run("DELETE FROM devices WHERE id = ?", [deviceId]);
       this.devices.delete(deviceId);
@@ -423,6 +519,7 @@ async startDevice(deviceId) {
       name: device.name,
       status: device.status,
       last_active: device.last_active,
+      reconnect_attempts: device.reconnectAttempts
     }));
   }
 
@@ -443,7 +540,16 @@ async startDevice(deviceId) {
       if (formattedPhone.length === 10) formattedPhone = "91" + formattedPhone;
       const whatsappId = formattedPhone + "@c.us";
 
-      console.log(`Sending to ${formattedPhone} via ${device.id}`);
+      console.log(`📤 Sending Hi to ${formattedPhone} via device ${device.id}`);
+
+      // Clean up any existing pending messages for this phone/device combo
+      await new Promise((resolve, reject) => {
+        db.run(
+          "DELETE FROM pending_messages WHERE phone = ? AND device_id = ?",
+          [formattedPhone, device.id],
+          (err) => (err ? reject(err) : resolve())
+        );
+      });
 
       // STEP 1: Send "Hi" message
       const hiMessage = "Hi";
@@ -453,14 +559,14 @@ async startDevice(deviceId) {
       await new Promise((resolve, reject) => {
         db.run(
           `INSERT INTO pending_messages 
-          (id, phone, message, device_id, hi_message_id) 
-          VALUES (?, ?, ?, ?, ?)`,
+          (id, phone, message, device_id, hi_message_id, status) 
+          VALUES (?, ?, ?, ?, ?, 'pending_reply')`,
           [msgId, formattedPhone, message, device.id, hiMsgResult.id.id],
           (err) => (err ? reject(err) : resolve())
         );
       });
 
-      console.log(`✓ Sent 'Hi' to ${formattedPhone}`);
+      console.log(`✅ Sent 'Hi' to ${formattedPhone}, waiting for reply...`);
       return { 
         success: true, 
         deviceId: device.id, 
@@ -468,12 +574,12 @@ async startDevice(deviceId) {
         status: 'pending_reply'
       };
     } catch (err) {
-      console.error(`✗ Failed to send 'Hi': ${err.message}`);
+      console.error(`❌ Failed to send 'Hi' to ${phone}: ${err.message}`);
 
       if (err.message.includes("Evaluation failed") || 
           err.message.includes("Target closed") ||
           err.message.includes("Protocol error")) {
-        console.log(`Restarting device ${device.id} due to connection error`);
+        console.log(`🔄 Restarting device ${device.id} due to connection error`);
         this.restartDevice(device.id);
       }
 
@@ -488,65 +594,83 @@ async startDevice(deviceId) {
     }
     
     const messageHandler = async (msg) => {
-      // Ignore our own messages and group messages
-      if (msg.fromMe || msg.isGroupMsg) return;
-      
-      // Extract phone number
-      const sender = msg.from.replace(/\D/g, '');
-      const formattedSender = sender.length === 10 ? "91" + sender : sender;
-      
-      console.log(`Received reply from ${formattedSender} on device ${deviceId}`);
-
       try {
+        // Ignore our own messages and group messages
+        if (msg.fromMe || msg.isGroupMsg) return;
+        
+        // Extract phone number
+        const sender = msg.from.replace('@c.us', '').replace(/\D/g, '');
+        const formattedSender = sender.length === 10 ? "91" + sender : sender;
+        
+        console.log(`📱 Received reply from ${formattedSender} on device ${deviceId}`);
+        console.log(`Message: ${msg.body}`);
+
         // Check for pending message
         const pending = await new Promise((resolve, reject) => {
           db.get(
             `SELECT * FROM pending_messages 
-            WHERE phone = ? AND device_id = ? AND status = 'pending_reply'`,
+            WHERE phone = ? AND device_id = ? AND status = 'pending_reply'
+            ORDER BY hi_sent_at DESC LIMIT 1`,
             [formattedSender, deviceId],
             (err, row) => (err ? reject(err) : resolve(row))
           );
         });
 
         if (pending) {
-          console.log(`Processing pending message for ${formattedSender}`);
+          console.log(`📤 Processing pending message for ${formattedSender}`);
           const whatsappId = formattedSender + "@c.us";
           
-          // Send actual message
-          await client.sendMessage(whatsappId, pending.message);
+          // Add small delay before sending actual message
+          await new Promise(resolve => setTimeout(resolve, 2000));
           
-          // Move to sent messages
+          // Send actual message
+          const msgResult = await client.sendMessage(whatsappId, pending.message);
+          console.log(`✅ Sent real message to ${formattedSender}: ${pending.message.substring(0, 50)}...`);
+          
+          // Move to sent messages and remove from pending
           await new Promise((resolve, reject) => {
             db.serialize(() => {
               db.run(
                 `INSERT INTO sent_messages 
-                (id, phone, message, device_id) 
-                VALUES (?, ?, ?, ?)`,
+                (id, phone, message, device_id, status) 
+                VALUES (?, ?, ?, ?, 'sent')`,
                 [pending.id, pending.phone, pending.message, pending.device_id],
                 (err) => {
-                  if (err) return reject(err);
+                  if (err) {
+                    console.error(`Error inserting sent message: ${err.message}`);
+                    return reject(err);
+                  }
                   
                   db.run(
-                    "DELETE FROM pending_messages WHERE id = ?",
+                    "UPDATE pending_messages SET status = 'completed' WHERE id = ?",
                     [pending.id],
-                    (err) => (err ? reject(err) : resolve())
+                    (err) => {
+                      if (err) {
+                        console.error(`Error updating pending message: ${err.message}`);
+                        return reject(err);
+                      }
+                      resolve();
+                    }
                   );
                 }
               );
             });
           });
 
-          console.log(`✓ Sent real message to ${formattedSender}`);
+          console.log(`✅ Message flow completed for ${formattedSender}`);
+        } else {
+          console.log(`ℹ️ No pending message found for ${formattedSender} on device ${deviceId}`);
         }
       } catch (err) {
-        console.error(`Error processing reply: ${err.message}`);
+        console.error(`❌ Error processing reply from ${msg.from}: ${err.message}`);
+        console.error(err.stack);
       }
     };
 
     // Add new listener and store reference
     client.on('message', messageHandler);
     this.messageListeners.set(deviceId, messageHandler);
-    console.log(`Message listener set up for device ${deviceId}`);
+    console.log(`👂 Message listener set up for device ${deviceId}`);
   }
 
   async restartDevice(deviceId) {
